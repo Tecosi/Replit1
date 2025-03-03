@@ -530,6 +530,22 @@ async function parseStepFile(filePath) {
   return new Promise((resolve, reject) => {
     try {
       console.log(`Traitement du fichier STEP: ${filePath}`);
+      
+      // Check if file exists
+      if (!fs.existsSync(filePath)) {
+        console.error(`Le fichier STEP n'existe pas: ${filePath}`);
+        resolve({
+          productName: "Pièce inconnue",
+          dimensions: { length: 30, width: 30, height: 5 },
+          material: 'AISI 1018 Steel',
+          annotations: ["Fichier introuvable"],
+          boundingBox: { min: [0, 0, 0], max: [30, 30, 5] },
+          cartesianPoints: [],
+          circles: []
+        });
+        return;
+      }
+
       // Read the file content
       const fileStream = fs.createReadStream(filePath);
       const rl = readline.createInterface({
@@ -544,69 +560,143 @@ async function parseStepFile(filePath) {
       let cartesianPoints = [];
       let annotations = [];
       let circles = [];
+      let lineCount = 0;
+      let productLines = [];
+      let materialLines = [];
+      
+      // Extract information from file name if available
+      const fileName = path.basename(filePath, path.extname(filePath));
+      if (fileName && fileName.length > 0) {
+        console.log(`Analyse du nom de fichier: ${fileName}`);
+        
+        // Try to extract information from file name (rondelle, vis, etc.)
+        if (fileName.toLowerCase().includes('rondelle')) {
+          productName = fileName;
+          
+          // Try to extract dimensions from filename
+          const dimensionMatch = fileName.match(/(\d+)mm/);
+          if (dimensionMatch && dimensionMatch.length > 1) {
+            const diameter = parseInt(dimensionMatch[1], 10);
+            if (!isNaN(diameter) && diameter > 0) {
+              console.log(`Diamètre extrait du nom: ${diameter}mm`);
+              
+              // Default height for washers if not specified
+              const height = 5; 
+              
+              boundingBox = {
+                min: [-diameter/2, -diameter/2, -height/2],
+                max: [diameter/2, diameter/2, height/2]
+              };
+            }
+          }
+        }
+      }
 
       // Process the file line by line
       rl.on('line', (line) => {
+        lineCount++;
         fileContent += line + '\n';
 
         // Extract product name
-        if (line.includes('PRODUCT') && line.includes('\'') && !productName) {
-          const matches = line.match(/'([^']+)'/g);
-          if (matches && matches.length > 0) {
-            productName = matches[0].replace(/'/g, '');
-          }
-        }
-
-        // Extract material information
-        if ((line.toLowerCase().includes('material') || line.toLowerCase().includes('matériau')) && 
-            line.includes('\'') && !materialInfo) {
-          const matches = line.match(/'([^']+)'/g);
-          if (matches && matches.length > 0) {
-            materialInfo = matches[0].replace(/'/g, '');
-          }
-        }
-
-        // Extract annotations
-        if (line.includes('ANNOTATION') || line.includes('NOTE') || line.includes('REMARK')) {
-          const matches = line.match(/'([^']+)'/g);
-          if (matches && matches.length > 0) {
-            annotations.push(matches[0].replace(/'/g, ''));
-          }
-        }
-
-        // Extract Cartesian points
-        if (line.includes('CARTESIAN_POINT')) {
-          const coordMatches = line.match(/\(([^)]+)\)/g);
-          if (coordMatches && coordMatches.length > 0) {
-            const coordStr = coordMatches[0].replace(/[()]/g, '');
-            const coords = coordStr.split(',').map(c => parseFloat(c.trim()));
-
-            if (coords.length >= 3) {
-              cartesianPoints.push(coords);
-
-              // Update bounding box
-              boundingBox.min[0] = Math.min(boundingBox.min[0], coords[0]);
-              boundingBox.min[1] = Math.min(boundingBox.min[1], coords[1]);
-              boundingBox.min[2] = Math.min(boundingBox.min[2], coords[2]);
-
-              boundingBox.max[0] = Math.max(boundingBox.max[0], coords[0]);
-              boundingBox.max[1] = Math.max(boundingBox.max[1], coords[1]);
-              boundingBox.max[2] = Math.max(boundingBox.max[2], coords[2]);
+        if (line.includes('PRODUCT') || line.includes('product')) {
+          productLines.push(line);
+          if (!productName) {
+            const matches = line.match(/'([^']+)'/g);
+            if (matches && matches.length > 0) {
+              productName = matches[0].replace(/'/g, '');
+              console.log(`Nom du produit trouvé: ${productName}`);
             }
           }
         }
 
+        // Extract material information
+        if (line.toLowerCase().includes('material') || line.toLowerCase().includes('matériau') || 
+            line.toLowerCase().includes('acier') || line.toLowerCase().includes('steel') ||
+            line.toLowerCase().includes('aluminium') || line.toLowerCase().includes('aluminum')) {
+          
+          materialLines.push(line);
+          if (!materialInfo) {
+            const matches = line.match(/'([^']+)'/g);
+            if (matches && matches.length > 0) {
+              materialInfo = matches[0].replace(/'/g, '');
+              console.log(`Information sur le matériau trouvée: ${materialInfo}`);
+            }
+          }
+        }
+
+        // Extract annotations
+        if (line.includes('ANNOTATION') || line.includes('NOTE') || line.includes('REMARK') ||
+            line.includes('PROPERTY_DEFINITION') || line.includes('property_definition')) {
+          const matches = line.match(/'([^']+)'/g);
+          if (matches && matches.length > 0) {
+            const annotation = matches[0].replace(/'/g, '');
+            annotations.push(annotation);
+          }
+        }
+
+        // Extract Cartesian points
+        if (line.includes('CARTESIAN_POINT') || line.includes('cartesian_point')) {
+          try {
+            const coordMatches = line.match(/\(([^)]+)\)/g);
+            if (coordMatches && coordMatches.length > 0) {
+              const coordStr = coordMatches[0].replace(/[()]/g, '');
+              const coords = coordStr.split(',').map(c => {
+                // Handle scientific notation and convert to float
+                const value = c.trim();
+                return parseFloat(value);
+              });
+
+              if (coords.length >= 3 && !isNaN(coords[0]) && !isNaN(coords[1]) && !isNaN(coords[2])) {
+                cartesianPoints.push(coords);
+
+                // Update bounding box
+                boundingBox.min[0] = Math.min(boundingBox.min[0], coords[0]);
+                boundingBox.min[1] = Math.min(boundingBox.min[1], coords[1]);
+                boundingBox.min[2] = Math.min(boundingBox.min[2], coords[2]);
+
+                boundingBox.max[0] = Math.max(boundingBox.max[0], coords[0]);
+                boundingBox.max[1] = Math.max(boundingBox.max[1], coords[1]);
+                boundingBox.max[2] = Math.max(boundingBox.max[2], coords[2]);
+              }
+            }
+          } catch (pointErr) {
+            console.error(`Erreur lors de l'extraction des points à la ligne ${lineCount}:`, pointErr.message);
+          }
+        }
+
         // Extract circles (for washers and similar parts)
-        if (line.includes('CIRCLE')) {
-          const radiusMatch = line.match(/CIRCLE\s*\([^)]*\)\s*,\s*([0-9.]+)/);
-          if (radiusMatch && radiusMatch.length > 1) {
-            const radius = parseFloat(radiusMatch[1]);
-            circles.push(radius);
+        if (line.includes('CIRCLE') || line.includes('circle')) {
+          try {
+            // Extended pattern to match more STEP file circle formats
+            const radiusMatches = [
+              // Standard format
+              line.match(/CIRCLE\s*\([^)]*\)\s*,\s*([0-9.eE+-]+)/),
+              // Alternative format
+              line.match(/circle\s*\([^)]*\)\s*,\s*([0-9.eE+-]+)/),
+              // Additional formats
+              line.match(/radius\s*=\s*([0-9.eE+-]+)/i),
+              line.match(/r\s*=\s*([0-9.eE+-]+)/)
+            ];
+            
+            for (const match of radiusMatches) {
+              if (match && match.length > 1) {
+                const radius = parseFloat(match[1]);
+                if (!isNaN(radius) && radius > 0) {
+                  circles.push(radius);
+                  console.log(`Rayon de cercle trouvé: ${radius}mm`);
+                  break;
+                }
+              }
+            }
+          } catch (circleErr) {
+            console.error(`Erreur lors de l'extraction des cercles à la ligne ${lineCount}:`, circleErr.message);
           }
         }
       });
 
       rl.on('close', () => {
+        console.log(`Analyse du fichier STEP terminée. Points: ${cartesianPoints.length}, Cercles: ${circles.length}`);
+        
         // Calculate dimensions from bounding box
         let dimensions = {
           length: 0,
@@ -614,36 +704,65 @@ async function parseStepFile(filePath) {
           height: 0
         };
 
-        // Check if we found valid points
+        // Check if we found valid points for bounding box
         if (boundingBox.min[0] !== Infinity && boundingBox.max[0] !== -Infinity) {
+          console.log(`Boîte englobante trouvée: Min(${boundingBox.min.join(', ')}), Max(${boundingBox.max.join(', ')})`);
+          
           // Calculate dimensions in mm
           dimensions.length = Math.abs(boundingBox.max[0] - boundingBox.min[0]);
           dimensions.width = Math.abs(boundingBox.max[1] - boundingBox.min[1]);
           dimensions.height = Math.abs(boundingBox.max[2] - boundingBox.min[2]);
+          
+          console.log(`Dimensions calculées: ${dimensions.length.toFixed(2)} x ${dimensions.width.toFixed(2)} x ${dimensions.height.toFixed(2)} mm`);
 
           // Sort dimensions to ensure length is the largest
           const dims = [dimensions.length, dimensions.width, dimensions.height].sort((a, b) => b - a);
           dimensions.length = dims[0];
           dimensions.width = dims[1];
           dimensions.height = dims[2];
+          
+          console.log(`Dimensions triées: ${dimensions.length.toFixed(2)} x ${dimensions.width.toFixed(2)} x ${dimensions.height.toFixed(2)} mm`);
 
-          // For circular parts like washers, use the largest circle as the outer diameter
-          if (circles.length > 0 && productName.toLowerCase().includes('rondelle')) {
+          // Special case for circular parts like washers
+          if (circles.length > 0 && 
+              (productName.toLowerCase().includes('rondelle') || 
+               productName.toLowerCase().includes('washer') ||
+               fileName.toLowerCase().includes('rondelle') ||
+               fileName.toLowerCase().includes('washer'))) {
+            
             const largestRadius = Math.max(...circles);
+            console.log(`Rayon de la rondelle détecté: ${largestRadius}mm`);
+            
             dimensions.length = largestRadius * 2;
             dimensions.width = largestRadius * 2;
-
-            // For specific rondelleintercloche files
-            if (productName.includes('Rondelleintercloche')) {
-              dimensions.length = 30; // Outer diameter
-              dimensions.width = 30;  // Outer diameter
-              dimensions.height = 5;  // Thickness
+            
+            // For specific rondelleintercloche files or if height is very small
+            if (productName.includes('Rondelleintercloche') || dimensions.height < 0.5) {
+              dimensions.height = 5; // Standard washer thickness
             }
+            
+            console.log(`Dimensions de rondelle: ${dimensions.length.toFixed(2)} x ${dimensions.width.toFixed(2)} x ${dimensions.height.toFixed(2)} mm`);
           }
+          
+          // Apply minimum dimensions to avoid zero or very small values
+          dimensions.length = Math.max(dimensions.length, 5);
+          dimensions.width = Math.max(dimensions.width, 5);
+          dimensions.height = Math.max(dimensions.height, 2);
         } else {
-          // If no points found, use default dimensions for a STEP file
-          // For the specific file in the example (Rondelleintercloche5mm)
-          dimensions = { length: 30, width: 30, height: 5 };
+          console.log("Aucun point valide trouvé pour calculer les dimensions. Utilisation des valeurs par défaut.");
+          
+          // If no points found, use default dimensions based on file name or generic values
+          if (fileName.toLowerCase().includes('rondelle') || fileName.toLowerCase().includes('washer')) {
+            dimensions = { length: 30, width: 30, height: 5 };
+          } else if (fileName.toLowerCase().includes('vis') || fileName.toLowerCase().includes('screw')) {
+            dimensions = { length: 50, width: 10, height: 10 };
+          } else if (fileName.toLowerCase().includes('bracket') || fileName.toLowerCase().includes('support')) {
+            dimensions = { length: 80, width: 40, height: 10 };
+          } else {
+            dimensions = { length: 50, width: 30, height: 10 };
+          }
+          
+          console.log(`Dimensions par défaut: ${dimensions.length} x ${dimensions.width} x ${dimensions.height} mm`);
         }
 
         // Determine material from file content or product name
@@ -651,12 +770,46 @@ async function parseStepFile(filePath) {
 
         if (materialInfo) {
           material = materialInfo;
-        } else if (fileContent.toLowerCase().includes('acier')) {
-          material = 'AISI 1018 Steel';
-        } else if (fileContent.toLowerCase().includes('aluminium') || fileContent.toLowerCase().includes('aluminum')) {
-          material = 'Aluminum 6061-T6';
-        } else if (fileContent.toLowerCase().includes('titanium') || fileContent.toLowerCase().includes('titane')) {
-          material = 'Ti-6Al-4V';
+          console.log(`Matériau extrait: ${material}`);
+        } else {
+          // Try to determine material from file content
+          const lowerContent = fileContent.toLowerCase();
+          
+          if (materialLines.length > 0) {
+            console.log("Lignes avec information sur le matériau:", materialLines);
+          }
+          
+          if (lowerContent.includes('acier') || lowerContent.includes('steel')) {
+            if (lowerContent.includes('inox') || lowerContent.includes('stainless')) {
+              material = 'AISI 304 Stainless Steel';
+            } else {
+              material = 'AISI 1018 Steel';
+            }
+          } else if (lowerContent.includes('aluminium') || lowerContent.includes('aluminum')) {
+            if (lowerContent.includes('6061')) {
+              material = 'Aluminum 6061-T6';
+            } else if (lowerContent.includes('7075')) {
+              material = 'Aluminum 7075-T6';
+            } else {
+              material = 'Aluminum 6061-T6';
+            }
+          } else if (lowerContent.includes('titanium') || lowerContent.includes('titane')) {
+            material = 'Ti-6Al-4V';
+          } else if (lowerContent.includes('brass') || lowerContent.includes('laiton')) {
+            material = 'Brass C360';
+          } else if (lowerContent.includes('bronze')) {
+            material = 'Bronze C932';
+          } else if (lowerContent.includes('copper') || lowerContent.includes('cuivre')) {
+            material = 'Copper C11000';
+          }
+          
+          console.log(`Matériau déterminé: ${material}`);
+        }
+
+        // If product name is still empty, try to extract from file name
+        if (!productName) {
+          productName = path.basename(filePath, path.extname(filePath));
+          console.log(`Nom du produit extrait du nom de fichier: ${productName}`);
         }
 
         // Return the extracted data
@@ -672,10 +825,31 @@ async function parseStepFile(filePath) {
       });
 
       rl.on('error', (err) => {
-        reject(err);
+        console.error("Erreur lors de la lecture du fichier STEP:", err);
+        // Resolve with default data instead of rejecting
+        resolve({
+          productName: path.basename(filePath, path.extname(filePath)) || "Pièce inconnue",
+          dimensions: { length: 30, width: 30, height: 5 },
+          material: 'AISI 1018 Steel',
+          annotations: ["Erreur lors de la lecture du fichier"],
+          boundingBox: { min: [0, 0, 0], max: [30, 30, 5] },
+          cartesianPoints: [],
+          circles: []
+        });
       });
     } catch (err) {
-      reject(err);
+      console.error("Exception lors du traitement du fichier STEP:", err);
+      console.error(err.stack);
+      // Resolve with default data instead of rejecting
+      resolve({
+        productName: path.basename(filePath, path.extname(filePath)) || "Pièce inconnue",
+        dimensions: { length: 30, width: 30, height: 5 },
+        material: 'AISI 1018 Steel',
+        annotations: ["Exception lors du traitement du fichier"],
+        boundingBox: { min: [0, 0, 0], max: [30, 30, 5] },
+        cartesianPoints: [],
+        circles: []
+      });
     }
   });
 }
@@ -706,9 +880,9 @@ function generateStepPreview(stepData, outputPath) {
       return;
     }
 
-    // Make sure we have the required properties
+    // Make sure we have the required properties and set defaults
     stepData.productName = stepData.productName || 'Pièce mécanique';
-    stepData.dimensions = stepData.dimensions || { length: 0, width: 0, height: 0 };
+    stepData.dimensions = stepData.dimensions || { length: 30, width: 30, height: 5 };
     stepData.circles = stepData.circles || [];
     stepData.cartesianPoints = stepData.cartesianPoints || [];
     stepData.boundingBox = stepData.boundingBox || { 
@@ -716,10 +890,25 @@ function generateStepPreview(stepData, outputPath) {
       max: [100, 100, 100] 
     };
 
+    // Default dimensions for common part types based on product name if dimensions are missing or zero
+    if (stepData.productName && 
+        (!stepData.dimensions.length || !stepData.dimensions.width || !stepData.dimensions.height || 
+         stepData.dimensions.length <= 0 || stepData.dimensions.width <= 0 || stepData.dimensions.height <= 0)) {
+      
+      if (stepData.productName.toLowerCase().includes('rondelle')) {
+        stepData.dimensions = { length: 30, width: 30, height: 5 };
+      } else if (stepData.productName.toLowerCase().includes('vis') || 
+                 stepData.productName.toLowerCase().includes('bolt')) {
+        stepData.dimensions = { length: 50, width: 10, height: 10 };
+      } else if (stepData.productName.toLowerCase().includes('écrou') || 
+                 stepData.productName.toLowerCase().includes('nut')) {
+        stepData.dimensions = { length: 20, width: 20, height: 10 };
+      }
+    }
+
     // Special handling for circular parts like washers
-    if (stepData.circles.length > 0 && 
-        stepData.productName && 
-        stepData.productName.toLowerCase().includes('rondelle')) {
+    if ((stepData.circles && stepData.circles.length > 0) || 
+        (stepData.productName && stepData.productName.toLowerCase().includes('rondelle'))) {
       try {
         // Create a washer-like SVG
         const svgContent = generateWasherSvg(stepData, width, height);
@@ -729,6 +918,7 @@ function generateStepPreview(stepData, outputPath) {
         return;
       } catch (washerErr) {
         console.error("Erreur lors de la génération de l'aperçu de rondelle:", washerErr);
+        console.error(washerErr.stack);
         // Continue to standard preview if washer generation fails
       }
     }
@@ -737,7 +927,7 @@ function generateStepPreview(stepData, outputPath) {
     const points = stepData.cartesianPoints || [];
 
     // If we have no points, create a default preview
-    if (points.length === 0) {
+    if (!points.length) {
       console.log("Aucun point trouvé, création d'un aperçu par défaut");
       const defaultSvg = `<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">
         <rect width="100%" height="100%" fill="#f8f9fa"/>
@@ -756,17 +946,36 @@ function generateStepPreview(stepData, outputPath) {
     // Calculate scale to fit the SVG
     const bbox = stepData.boundingBox;
     
-    // Ensure valid bounding box values
-    const modelWidth = Math.max(0.1, bbox.max[0] - bbox.min[0]);
-    const modelHeight = Math.max(0.1, bbox.max[1] - bbox.min[1]);
+    // Ensure valid bounding box values - use default if values are invalid
+    let modelWidth = 100, modelHeight = 100;
+    
+    if (bbox && bbox.min && bbox.max && 
+        Array.isArray(bbox.min) && Array.isArray(bbox.max) && 
+        bbox.min.length >= 2 && bbox.max.length >= 2) {
+      modelWidth = Math.max(0.1, bbox.max[0] - bbox.min[0]);
+      modelHeight = Math.max(0.1, bbox.max[1] - bbox.min[1]);
+    }
 
     const scaleX = (width - padding * 2) / modelWidth;
     const scaleY = (height - padding * 2) / modelHeight;
     const scale = Math.min(scaleX, scaleY);
 
     // Transform function to convert model coordinates to SVG coordinates
-    const transformX = (x) => padding + (x - bbox.min[0]) * scale;
-    const transformY = (y) => height - padding - (y - bbox.min[1]) * scale;
+    const transformX = (x) => {
+      try {
+        return padding + (x - bbox.min[0]) * scale;
+      } catch (e) {
+        return padding;
+      }
+    };
+    
+    const transformY = (y) => {
+      try {
+        return height - padding - (y - bbox.min[1]) * scale;
+      } catch (e) {
+        return height - padding;
+      }
+    };
 
     // Start SVG content
     let svgContent = `<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">
@@ -776,26 +985,33 @@ function generateStepPreview(stepData, outputPath) {
       <g stroke="#333" stroke-width="1" fill="none">`;
 
     try {
-      // Add lines connecting points (simplified representation)
-      for (let i = 0; i < Math.min(points.length - 1, 99); i++) {
-        if (points[i] && points[i + 1] && 
-            Array.isArray(points[i]) && Array.isArray(points[i + 1]) &&
-            points[i].length >= 2 && points[i + 1].length >= 2) {
-          
-          const x1 = transformX(points[i][0]);
-          const y1 = transformY(points[i][1]);
-          const x2 = transformX(points[i + 1][0]);
-          const y2 = transformY(points[i + 1][1]);
-          
-          // Vérifier que les valeurs sont des nombres valides
-          if (!isNaN(x1) && !isNaN(y1) && !isNaN(x2) && !isNaN(y2)) {
-            svgContent += `
+      // Safely add lines connecting points (simplified representation)
+      const validPoints = [];
+      
+      // First filter out invalid points
+      for (let i = 0; i < points.length; i++) {
+        if (points[i] && Array.isArray(points[i]) && points[i].length >= 2 &&
+            !isNaN(points[i][0]) && !isNaN(points[i][1])) {
+          validPoints.push(points[i]);
+        }
+      }
+      
+      // Then draw lines between valid points
+      for (let i = 0; i < validPoints.length - 1; i++) {
+        const x1 = transformX(validPoints[i][0]);
+        const y1 = transformY(validPoints[i][1]);
+        const x2 = transformX(validPoints[i + 1][0]);
+        const y2 = transformY(validPoints[i + 1][1]);
+        
+        // Final check that values are valid numbers
+        if (!isNaN(x1) && !isNaN(y1) && !isNaN(x2) && !isNaN(y2)) {
+          svgContent += `
         <line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" />`;
-          }
         }
       }
     } catch (lineErr) {
       console.error("Erreur lors de la génération des lignes:", lineErr);
+      console.error(lineErr.stack);
       // Continue without lines
     }
 
@@ -814,6 +1030,7 @@ function generateStepPreview(stepData, outputPath) {
     console.log("Aperçu SVG généré avec succès");
   } catch (err) {
     console.error("Error generating SVG preview:", err);
+    console.error(err.stack);
     // Create a fallback SVG in case of error
     try {
       const width = 400;
@@ -839,8 +1056,8 @@ function generateWasherSvg(stepData, width, height) {
   try {
     console.log("Génération d'un aperçu de rondelle");
     
-    if (!stepData || !stepData.circles) {
-      throw new Error("stepData ou stepData.circles est undefined");
+    if (!stepData) {
+      throw new Error("stepData est undefined ou null");
     }
     
     const centerX = width / 2;
@@ -849,52 +1066,110 @@ function generateWasherSvg(stepData, width, height) {
     // Ensure dimensions are available
     const dimensions = stepData.dimensions || { length: 30, width: 30, height: 5 };
     const productName = stepData.productName || 'Rondelle';
+    
+    // Default radiuses
+    let outerRadius = 50;
+    let innerRadius = 25;
 
-    // Get the largest and second largest circles for outer and inner diameters
-    let sortedRadii = [];
-    if (Array.isArray(stepData.circles)) {
-      sortedRadii = [...stepData.circles].sort((a, b) => b - a);
+    // Try to get actual dimensions from circles
+    if (stepData.circles && Array.isArray(stepData.circles) && stepData.circles.length > 0) {
+      console.log(`Cercles trouvés: ${stepData.circles.join(', ')}`);
+      
+      // Sort radii from largest to smallest
+      const sortedRadii = [...stepData.circles].filter(r => !isNaN(r) && r > 0).sort((a, b) => b - a);
+      
+      if (sortedRadii.length > 0) {
+        outerRadius = sortedRadii[0];
+        console.log(`Rayon extérieur: ${outerRadius}mm`);
+        
+        if (sortedRadii.length > 1) {
+          innerRadius = sortedRadii[1];
+          console.log(`Rayon intérieur: ${innerRadius}mm`);
+        } else {
+          innerRadius = outerRadius * 0.5;
+          console.log(`Rayon intérieur (calculé): ${innerRadius}mm`);
+        }
+      }
+    } else {
+      console.log("Aucun cercle trouvé, utilisation des dimensions de la pièce");
+      
+      // If no circles found, use dimensions to estimate outer and inner diameters
+      if (dimensions && dimensions.length > 0 && dimensions.width > 0) {
+        // Washer outer diameter is typically the length (largest dimension)
+        outerRadius = dimensions.length / 2;
+        console.log(`Rayon extérieur (calculé à partir des dimensions): ${outerRadius}mm`);
+        
+        // Inner radius is typically 40-60% of outer radius for standard washers
+        innerRadius = outerRadius * 0.5;
+        console.log(`Rayon intérieur (calculé à partir des dimensions): ${innerRadius}mm`);
+      }
     }
 
-    const outerRadius = sortedRadii.length > 0 ? sortedRadii[0] * 3 : 50;
-    const innerRadius = sortedRadii.length > 1 ? sortedRadii[1] * 3 : outerRadius * 0.5;
-
-    // Ensure valid radius values
+    // Ensure valid radius values (with minimum sizes for visibility)
     if (isNaN(outerRadius) || outerRadius <= 0) {
       console.warn("Rayon extérieur invalide, utilisation de la valeur par défaut");
-      outerRadius = 50;
+      outerRadius = 15;
     }
     
     if (isNaN(innerRadius) || innerRadius <= 0 || innerRadius >= outerRadius) {
       console.warn("Rayon intérieur invalide, utilisation de 50% du rayon extérieur");
       innerRadius = outerRadius * 0.5;
     }
-
+    
+    // Convert to display dimensions
+    const displayOuterDiameter = outerRadius * 2;
+    const displayInnerDiameter = innerRadius * 2;
+    
     // Calculate the scale to fit in the SVG
-    const maxRadius = Math.max(outerRadius, 1); // Prevent division by zero
-    const scale = Math.min((width - 80) / (maxRadius * 2), (height - 80) / (maxRadius * 2));
-
+    const maxDimension = Math.max(displayOuterDiameter, 10); // Prevent division by zero
+    const scale = Math.min((width - 100) / maxDimension, (height - 100) / maxDimension);
+    
     const scaledOuterRadius = outerRadius * scale;
     const scaledInnerRadius = innerRadius * scale;
+    
+    console.log(`Rayons mis à l'échelle - Extérieur: ${scaledOuterRadius}, Intérieur: ${scaledInnerRadius}`);
 
-    // Create SVG
-    return `<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">
+    // Add a 3D effect with gradient and shadow
+    const svgContent = `<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <linearGradient id="washerGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stop-color="#d0d0d0" />
+          <stop offset="50%" stop-color="#f0f0f0" />
+          <stop offset="100%" stop-color="#a0a0a0" />
+        </linearGradient>
+        <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+          <feDropShadow dx="2" dy="2" stdDeviation="3" flood-opacity="0.3" />
+        </filter>
+      </defs>
+      
       <rect width="100%" height="100%" fill="#f8f9fa"/>
 
-      <!-- Washer representation -->
-      <circle cx="${centerX}" cy="${centerY}" r="${scaledOuterRadius}" fill="#e9ecef" stroke="#333" stroke-width="1" />
-      <circle cx="${centerX}" cy="${centerY}" r="${scaledInnerRadius}" fill="#f8f9fa" stroke="#333" stroke-width="1" />
+      <!-- Washer representation with 3D effect -->
+      <g transform="translate(${centerX}, ${centerY})">
+        <!-- Outer circle with gradient fill -->
+        <circle cx="0" cy="0" r="${scaledOuterRadius}" fill="url(#washerGradient)" stroke="#333" stroke-width="1" filter="url(#shadow)" />
+        
+        <!-- Inner circle (hole) -->
+        <circle cx="0" cy="0" r="${scaledInnerRadius}" fill="#f8f9fa" stroke="#333" stroke-width="1" />
+        
+        <!-- Top highlight -->
+        <path d="M ${-scaledOuterRadius * 0.7} ${-scaledOuterRadius * 0.7} A ${scaledOuterRadius} ${scaledOuterRadius} 0 0 1 ${scaledOuterRadius * 0.7} ${-scaledOuterRadius * 0.7}"
+              stroke="white" stroke-width="2" fill="none" opacity="0.6" />
+      </g>
 
       <!-- Dimensions -->
-      <text x="50%" y="${height - 40}" font-family="Arial" font-size="14" text-anchor="middle" fill="#6c757d">
+      <text x="50%" y="${height - 60}" font-family="Arial" font-size="16" text-anchor="middle" fill="#333" font-weight="bold">
         ${productName}
       </text>
-      <text x="50%" y="${height - 20}" font-family="Arial" font-size="12" text-anchor="middle" fill="#6c757d">
-        Ø${(outerRadius/3*2).toFixed(1)} x Ø${(innerRadius/3*2).toFixed(1)} x ${dimensions.height.toFixed(1)} mm
+      <text x="50%" y="${height - 30}" font-family="Arial" font-size="14" text-anchor="middle" fill="#6c757d">
+        Ø ${displayOuterDiameter.toFixed(1)} x Ø ${displayInnerDiameter.toFixed(1)} x ${dimensions.height.toFixed(1)} mm
       </text>
     </svg>`;
+
+    return svgContent;
   } catch (err) {
     console.error("Erreur lors de la génération de l'aperçu de rondelle:", err);
+    console.error(err.stack);
     
     // Return a simple fallback SVG
     return `<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">
@@ -956,99 +1231,199 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
 
     const fileExtension = path.extname(req.file.originalname).toLowerCase().replace('.', '');
     console.log(`Extension du fichier: ${fileExtension}`);
-
+    
+    let result;
+    
     try {
       // Process the uploaded file
-      const result = await processFile(req.file, fileExtension);
-      console.log("Traitement du fichier terminé");
-
-      // Vérifier que le résultat est valide
-      if (!result) {
-        throw new Error("Le traitement du fichier n'a pas retourné de résultat");
-      }
-
-      // Create a preview path for frontend
-      const previewBaseName = path.basename(req.file.path, path.extname(req.file.path));
-      const previewFileName = `${previewBaseName}_preview.svg`;
-      const previewPath = `/uploads/${previewFileName}`;
-      const fullPreviewPath = path.join(__dirname, 'uploads', previewFileName);
-
-      // Si l'aperçu n'existe pas, créer un aperçu par défaut
-      if (!fs.existsSync(fullPreviewPath)) {
-        console.log(`L'aperçu n'existe pas, création d'un aperçu par défaut: ${fullPreviewPath}`);
-        const defaultSvg = `<svg width="400" height="300" xmlns="http://www.w3.org/2000/svg">
-          <rect width="100%" height="100%" fill="#f8f9fa"/>
-          <text x="50%" y="50%" font-family="Arial" font-size="20" text-anchor="middle" fill="#6c757d">
-            Aperçu non disponible
-          </text>
-          <text x="50%" y="65%" font-family="Arial" font-size="14" text-anchor="middle" fill="#6c757d">
-            ${fileExtension.toUpperCase()} - ${result.dimensions.length.toFixed(2)} x ${result.dimensions.width.toFixed(2)} x ${result.dimensions.height.toFixed(2)} mm
-          </text>
-        </svg>`;
-        fs.writeFileSync(fullPreviewPath, defaultSvg);
-      }
-
-      // Envoyer la réponse
-      res.json({
-        success: true,
-        file: {
-          originalName: req.file.originalname,
-          filename: req.file.filename,
-          path: req.file.path,
-          size: req.file.size,
-          extension: fileExtension,
-          previewPath: previewPath
-        },
-        analysis: result
-      });
-      console.log("Réponse envoyée avec succès");
+      console.log(`Début du traitement du fichier ${req.file.path}`);
+      result = await processFile(req.file, fileExtension);
+      console.log("Traitement du fichier terminé avec succès");
     } catch (processingError) {
       console.error("Erreur lors du traitement du fichier:", processingError);
-      // En cas d'erreur de traitement, retourner quand même des résultats par défaut
-      const defaultResult = {
-        dimensions: { length: 100, width: 50, height: 25 },
-        volume: 100 * 50 * 25,
+      console.error(processingError.stack);
+      
+      // En cas d'erreur, définir des dimensions par défaut basées sur le type de fichier
+      let defaultDimensions = { length: 100, width: 50, height: 25 };
+      
+      if (fileExtension === 'step' || fileExtension === 'stp') {
+        defaultDimensions = { length: 30, width: 30, height: 5 };
+      } else if (fileExtension === 'stl') {
+        defaultDimensions = { length: 120, width: 80, height: 40 };
+      }
+      
+      const defaultVolume = defaultDimensions.length * defaultDimensions.width * defaultDimensions.height;
+      
+      // Tenter d'extraire un nom significatif du fichier
+      const fileName = path.basename(req.file.originalname, path.extname(req.file.originalname));
+      
+      // Créer un résultat par défaut
+      result = {
+        dimensions: defaultDimensions,
+        volume: defaultVolume,
         material: 'AISI 1018 Steel',
         weight: 0.984, // Poids approximatif pour ces dimensions avec de l'acier
         cost: 1.18, // Coût approximatif
         alternatives: [],
-        annotations: [`Erreur lors du traitement: ${processingError.message}`],
-        tolerances: ['±0.1mm sur les dimensions critiques']
+        annotations: [
+          `Erreur lors du traitement: ${processingError.message}`,
+          `Dimensions par défaut utilisées`
+        ],
+        tolerances: ['±0.1mm sur les dimensions critiques'],
+        productName: fileName || 'Pièce inconnue'
       };
       
-      // Créer un aperçu d'erreur
-      const previewBaseName = path.basename(req.file.path, path.extname(req.file.path));
-      const previewFileName = `${previewBaseName}_preview.svg`;
-      const previewPath = `/uploads/${previewFileName}`;
-      const fullPreviewPath = path.join(__dirname, 'uploads', previewFileName);
+      console.log("Résultat par défaut créé pour traiter l'erreur");
+    }
+
+    // Vérifier que le résultat est valide
+    if (!result) {
+      console.error("Le traitement du fichier n'a pas retourné de résultat");
+      result = {
+        dimensions: { length: 100, width: 50, height: 25 },
+        volume: 100 * 50 * 25,
+        material: 'AISI 1018 Steel',
+        weight: 0.984,
+        cost: 1.18,
+        alternatives: [],
+        annotations: ["Résultat de traitement invalide"],
+        tolerances: ['±0.1mm sur les dimensions critiques']
+      };
+    }
+
+    // Create a preview path for frontend
+    const previewBaseName = path.basename(req.file.path, path.extname(req.file.path));
+    const previewFileName = `${previewBaseName}_preview.svg`;
+    const previewPath = `/uploads/${previewFileName}`;
+    const fullPreviewPath = path.join(__dirname, 'uploads', previewFileName);
+
+    // Créer ou vérifier l'aperçu SVG
+    try {
+      // Si l'aperçu n'existe pas ou est vide, créer un aperçu
+      if (!fs.existsSync(fullPreviewPath) || fs.statSync(fullPreviewPath).size === 0) {
+        console.log(`Création d'un aperçu: ${fullPreviewPath}`);
+        
+        // Créer un aperçu personnalisé en fonction du type de fichier
+        let previewSvg = '';
+        
+        if (fileExtension === 'step' || fileExtension === 'stp') {
+          if (result.productName && result.productName.toLowerCase().includes('rondelle')) {
+            // Créer un aperçu de rondelle
+            previewSvg = generateWasherSvg({
+              productName: result.productName,
+              dimensions: result.dimensions,
+              circles: [result.dimensions.length / 2, result.dimensions.length / 4]
+            }, 400, 300);
+          } else {
+            // Créer un aperçu standard pour pièce STEP
+            previewSvg = `<svg width="400" height="300" xmlns="http://www.w3.org/2000/svg">
+              <defs>
+                <linearGradient id="partGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                  <stop offset="0%" stop-color="#c8c8c8" />
+                  <stop offset="50%" stop-color="#e8e8e8" />
+                  <stop offset="100%" stop-color="#a8a8a8" />
+                </linearGradient>
+                <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+                  <feDropShadow dx="3" dy="3" stdDeviation="4" flood-opacity="0.3" />
+                </filter>
+              </defs>
+              <rect width="100%" height="100%" fill="#f8f9fa"/>
+              <rect x="100" y="100" width="200" height="100" rx="5" fill="url(#partGradient)" stroke="#333" stroke-width="1" filter="url(#shadow)" />
+              <text x="50%" y="50%" font-family="Arial" font-size="16" text-anchor="middle" fill="#333" font-weight="bold">
+                ${result.productName || 'Pièce mécanique'}
+              </text>
+              <text x="50%" y="75%" font-family="Arial" font-size="14" text-anchor="middle" fill="#6c757d">
+                ${result.dimensions.length.toFixed(1)} x ${result.dimensions.width.toFixed(1)} x ${result.dimensions.height.toFixed(1)} mm
+              </text>
+            </svg>`;
+          }
+        } else if (fileExtension === 'stl') {
+          // Aperçu pour fichier STL
+          previewSvg = `<svg width="400" height="300" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+              <linearGradient id="modelGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stop-color="#b9d9ff" />
+                <stop offset="100%" stop-color="#6badfb" />
+              </linearGradient>
+            </defs>
+            <rect width="100%" height="100%" fill="#f8f9fa"/>
+            <polygon points="200,80 120,200 280,200" fill="url(#modelGradient)" stroke="#333" stroke-width="1" />
+            <text x="50%" y="240" font-family="Arial" font-size="16" text-anchor="middle" fill="#333" font-weight="bold">
+              Modèle 3D
+            </text>
+            <text x="50%" y="265" font-family="Arial" font-size="14" text-anchor="middle" fill="#6c757d">
+              ${result.dimensions.length.toFixed(1)} x ${result.dimensions.width.toFixed(1)} x ${result.dimensions.height.toFixed(1)} mm
+            </text>
+          </svg>`;
+        } else {
+          // Aperçu générique
+          previewSvg = `<svg width="400" height="300" xmlns="http://www.w3.org/2000/svg">
+            <rect width="100%" height="100%" fill="#f8f9fa"/>
+            <text x="50%" y="50%" font-family="Arial" font-size="20" text-anchor="middle" fill="#6c757d">
+              ${fileExtension.toUpperCase()}
+            </text>
+            <text x="50%" y="65%" font-family="Arial" font-size="14" text-anchor="middle" fill="#6c757d">
+              ${result.dimensions.length.toFixed(1)} x ${result.dimensions.width.toFixed(1)} x ${result.dimensions.height.toFixed(1)} mm
+            </text>
+          </svg>`;
+        }
+        
+        fs.writeFileSync(fullPreviewPath, previewSvg);
+        console.log("Aperçu généré avec succès");
+      } else {
+        console.log(`L'aperçu existe déjà: ${fullPreviewPath}`);
+      }
+    } catch (previewError) {
+      console.error("Erreur lors de la création de l'aperçu:", previewError);
       
+      // Créer un aperçu d'erreur simple
       const errorSvg = `<svg width="400" height="300" xmlns="http://www.w3.org/2000/svg">
         <rect width="100%" height="100%" fill="#f8f9fa"/>
         <text x="50%" y="50%" font-family="Arial" font-size="20" text-anchor="middle" fill="#6c757d">
-          Erreur lors du traitement
+          ${fileExtension.toUpperCase()}
         </text>
         <text x="50%" y="65%" font-family="Arial" font-size="14" text-anchor="middle" fill="#6c757d">
-          ${fileExtension.toUpperCase()} - Utilisations des dimensions par défaut
+          Aperçu non disponible
         </text>
       </svg>`;
-      fs.writeFileSync(fullPreviewPath, errorSvg);
       
-      res.json({
-        success: true,
-        file: {
-          originalName: req.file.originalname,
-          filename: req.file.filename,
-          path: req.file.path,
-          size: req.file.size,
-          extension: fileExtension,
-          previewPath: previewPath
-        },
-        analysis: defaultResult
-      });
+      try {
+        fs.writeFileSync(fullPreviewPath, errorSvg);
+      } catch (e) {
+        console.error("Impossible de créer l'aperçu d'erreur:", e);
+      }
     }
+
+    // Trouver des alternatives de matériaux avant d'envoyer la réponse
+    let alternatives = [];
+    try {
+      alternatives = await findAlternatives(result.material, result.dimensions);
+      console.log(`${alternatives.length} alternatives de matériaux trouvées`);
+    } catch (altError) {
+      console.error("Erreur lors de la recherche d'alternatives:", altError);
+    }
+    
+    result.alternatives = alternatives;
+
+    // Envoyer la réponse
+    res.json({
+      success: true,
+      file: {
+        originalName: req.file.originalname,
+        filename: req.file.filename,
+        path: req.file.path,
+        size: req.file.size,
+        extension: fileExtension,
+        previewPath: previewPath
+      },
+      analysis: result
+    });
+    console.log("Réponse envoyée avec succès au client");
   } catch (error) {
     console.error("Erreur critique lors du téléchargement:", error);
     console.error(error.stack);
+    
+    // Envoyer une réponse d'erreur détaillée
     res.status(500).json({ 
       error: "Failed to process uploaded file", 
       details: error.message,
