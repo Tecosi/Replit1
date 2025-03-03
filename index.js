@@ -341,7 +341,7 @@ function calculateSimilarityScore(original, alternative) {
 async function compareMaterials(original, alternative, dimensions) {
   // Calculate volume if dimensions are available
   let volume = 1000; // Default volume
-  if (dimensions && dimensions.length && dimensions.width && dimensions.height) {
+  if (dimensions && dimensions.length && dimensions.width) {
     volume = dimensions.length * dimensions.width * dimensions.height;
   }
 
@@ -442,18 +442,36 @@ async function processFile(file, fileExtension) {
     case 'step':
     case 'stp':
       try {
+        console.log(`Traitement du fichier STEP/STP: ${file.path}`);
+
         // Extract dimensions from STEP file
         const stepData = await parseStepFile(file.path);
 
         if (stepData) {
+          console.log("Données STEP extraites:", JSON.stringify({
+            productName: stepData.productName,
+            dimensions: stepData.dimensions,
+            material: stepData.material,
+            pointsCount: stepData.cartesianPoints ? stepData.cartesianPoints.length : 0,
+            circlesCount: stepData.circles ? stepData.circles.length : 0
+          }, null, 2));
+
           dimensions = stepData.dimensions;
           material = stepData.material || material;
           annotations = stepData.annotations || annotations;
 
           // Generate a preview SVG for the STEP file
           const previewSvgPath = path.join(__dirname, 'uploads', `${path.basename(file.path, path.extname(file.path))}_preview.svg`);
+          console.log(`Génération de l'aperçu SVG: ${previewSvgPath}`);
+
+          // Ensure stepData has all necessary properties
+          if (!stepData.cartesianPoints) stepData.cartesianPoints = [];
+          if (!stepData.circles) stepData.circles = [];
+          if (!stepData.annotations) stepData.annotations = [];
+
           generateStepPreview(stepData, previewSvgPath);
         } else {
+          console.log("Aucune données STEP extraites, utilisation des dimensions par défaut");
           // Default dimensions for STEP files if parsing fails
           dimensions = { length: 30, width: 20, height: 5 };
         }
@@ -462,6 +480,7 @@ async function processFile(file, fileExtension) {
         volume = dimensions.length * dimensions.width * dimensions.height;
       } catch (err) {
         console.error("Error processing STEP file:", err);
+        console.error(err.stack);
         // Default dimensions for STEP files if an error occurs
         dimensions = { length: 30, width: 20, height: 5 };
         volume = dimensions.length * dimensions.width * dimensions.height;
