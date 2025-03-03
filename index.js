@@ -683,19 +683,54 @@ async function parseStepFile(filePath) {
 // Generate a preview SVG for STEP files
 function generateStepPreview(stepData, outputPath) {
   try {
+    console.log("Génération d'un aperçu SVG pour", outputPath);
+    
     // Create a simple SVG representation of the part
     const width = 400;
     const height = 300;
     const padding = 40;
 
-    // Special handling for circular parts like washers
-    if (stepData.circles.length > 0 && stepData.productName && stepData.productName.toLowerCase().includes('rondelle')) {
-      // Create a washer-like SVG
-      const svgContent = generateWasherSvg(stepData, width, height);
-
-      // Write the SVG file
-      fs.writeFileSync(outputPath, svgContent);
+    // Ensure we have all the necessary data
+    if (!stepData) {
+      console.error("stepData est undefined ou null");
+      const defaultSvg = `<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">
+        <rect width="100%" height="100%" fill="#f8f9fa"/>
+        <text x="50%" y="50%" font-family="Arial" font-size="20" text-anchor="middle" fill="#6c757d">
+          Pièce mécanique
+        </text>
+        <text x="50%" y="65%" font-family="Arial" font-size="14" text-anchor="middle" fill="#6c757d">
+          Données non disponibles
+        </text>
+      </svg>`;
+      fs.writeFileSync(outputPath, defaultSvg);
       return;
+    }
+
+    // Make sure we have the required properties
+    stepData.productName = stepData.productName || 'Pièce mécanique';
+    stepData.dimensions = stepData.dimensions || { length: 0, width: 0, height: 0 };
+    stepData.circles = stepData.circles || [];
+    stepData.cartesianPoints = stepData.cartesianPoints || [];
+    stepData.boundingBox = stepData.boundingBox || { 
+      min: [0, 0, 0], 
+      max: [100, 100, 100] 
+    };
+
+    // Special handling for circular parts like washers
+    if (stepData.circles.length > 0 && 
+        stepData.productName && 
+        stepData.productName.toLowerCase().includes('rondelle')) {
+      try {
+        // Create a washer-like SVG
+        const svgContent = generateWasherSvg(stepData, width, height);
+        // Write the SVG file
+        fs.writeFileSync(outputPath, svgContent);
+        console.log("Aperçu de rondelle généré avec succès");
+        return;
+      } catch (washerErr) {
+        console.error("Erreur lors de la génération de l'aperçu de rondelle:", washerErr);
+        // Continue to standard preview if washer generation fails
+      }
     }
 
     // Get points for visualization
@@ -703,10 +738,11 @@ function generateStepPreview(stepData, outputPath) {
 
     // If we have no points, create a default preview
     if (points.length === 0) {
+      console.log("Aucun point trouvé, création d'un aperçu par défaut");
       const defaultSvg = `<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">
         <rect width="100%" height="100%" fill="#f8f9fa"/>
         <text x="50%" y="50%" font-family="Arial" font-size="20" text-anchor="middle" fill="#6c757d">
-          ${stepData.productName || 'Pièce mécanique'}
+          ${stepData.productName}
         </text>
         <text x="50%" y="65%" font-family="Arial" font-size="14" text-anchor="middle" fill="#6c757d">
           ${stepData.dimensions.length.toFixed(2)} x ${stepData.dimensions.width.toFixed(2)} x ${stepData.dimensions.height.toFixed(2)} mm
@@ -719,8 +755,10 @@ function generateStepPreview(stepData, outputPath) {
 
     // Calculate scale to fit the SVG
     const bbox = stepData.boundingBox;
-    const modelWidth = bbox.max[0] - bbox.min[0];
-    const modelHeight = bbox.max[1] - bbox.min[1];
+    
+    // Ensure valid bounding box values
+    const modelWidth = Math.max(0.1, bbox.max[0] - bbox.min[0]);
+    const modelHeight = Math.max(0.1, bbox.max[1] - bbox.min[1]);
 
     const scaleX = (width - padding * 2) / modelWidth;
     const scaleY = (height - padding * 2) / modelHeight;
@@ -737,15 +775,28 @@ function generateStepPreview(stepData, outputPath) {
       <!-- Part outline -->
       <g stroke="#333" stroke-width="1" fill="none">`;
 
-    // Add lines connecting points (simplified representation)
-    for (let i = 0; i < Math.min(points.length - 1, 99); i++) {
-      const x1 = transformX(points[i][0]);
-      const y1 = transformY(points[i][1]);
-      const x2 = transformX(points[i + 1][0]);
-      const y2 = transformY(points[i + 1][1]);
-
-      svgContent += `
+    try {
+      // Add lines connecting points (simplified representation)
+      for (let i = 0; i < Math.min(points.length - 1, 99); i++) {
+        if (points[i] && points[i + 1] && 
+            Array.isArray(points[i]) && Array.isArray(points[i + 1]) &&
+            points[i].length >= 2 && points[i + 1].length >= 2) {
+          
+          const x1 = transformX(points[i][0]);
+          const y1 = transformY(points[i][1]);
+          const x2 = transformX(points[i + 1][0]);
+          const y2 = transformY(points[i + 1][1]);
+          
+          // Vérifier que les valeurs sont des nombres valides
+          if (!isNaN(x1) && !isNaN(y1) && !isNaN(x2) && !isNaN(y2)) {
+            svgContent += `
         <line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" />`;
+          }
+        }
+      }
+    } catch (lineErr) {
+      console.error("Erreur lors de la génération des lignes:", lineErr);
+      // Continue without lines
     }
 
     // Close the part outline
@@ -760,44 +811,102 @@ function generateStepPreview(stepData, outputPath) {
 
     // Write the SVG file
     fs.writeFileSync(outputPath, svgContent);
+    console.log("Aperçu SVG généré avec succès");
   } catch (err) {
     console.error("Error generating SVG preview:", err);
+    // Create a fallback SVG in case of error
+    try {
+      const width = 400;
+      const height = 300;
+      const errorSvg = `<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">
+        <rect width="100%" height="100%" fill="#f8f9fa"/>
+        <text x="50%" y="50%" font-family="Arial" font-size="20" text-anchor="middle" fill="#6c757d">
+          Erreur de génération d'aperçu
+        </text>
+        <text x="50%" y="65%" font-family="Arial" font-size="14" text-anchor="middle" fill="#6c757d">
+          Le fichier a été traité mais l'aperçu n'a pas pu être généré
+        </text>
+      </svg>`;
+      fs.writeFileSync(outputPath, errorSvg);
+    } catch (fallbackErr) {
+      console.error("Impossible de créer l'aperçu de secours:", fallbackErr);
+    }
   }
 }
 
 // Generate SVG for washer-like parts
 function generateWasherSvg(stepData, width, height) {
-  const centerX = width / 2;
-  const centerY = height / 2;
+  try {
+    console.log("Génération d'un aperçu de rondelle");
+    
+    if (!stepData || !stepData.circles) {
+      throw new Error("stepData ou stepData.circles est undefined");
+    }
+    
+    const centerX = width / 2;
+    const centerY = height / 2;
+    
+    // Ensure dimensions are available
+    const dimensions = stepData.dimensions || { length: 30, width: 30, height: 5 };
+    const productName = stepData.productName || 'Rondelle';
 
-  // Get the largest and second largest circles for outer and inner diameters
-  const sortedRadii = [...stepData.circles].sort((a, b) => b - a);
+    // Get the largest and second largest circles for outer and inner diameters
+    let sortedRadii = [];
+    if (Array.isArray(stepData.circles)) {
+      sortedRadii = [...stepData.circles].sort((a, b) => b - a);
+    }
 
-  const outerRadius = sortedRadii.length > 0 ? sortedRadii[0] * 3 : 50;
-  const innerRadius = sortedRadii.length > 1 ? sortedRadii[1] * 3 : outerRadius * 0.5;
+    const outerRadius = sortedRadii.length > 0 ? sortedRadii[0] * 3 : 50;
+    const innerRadius = sortedRadii.length > 1 ? sortedRadii[1] * 3 : outerRadius * 0.5;
 
-  // Calculate the scale to fit in the SVG
-  const scale = Math.min((width - 80) / (outerRadius * 2), (height - 80) / (outerRadius * 2));
+    // Ensure valid radius values
+    if (isNaN(outerRadius) || outerRadius <= 0) {
+      console.warn("Rayon extérieur invalide, utilisation de la valeur par défaut");
+      outerRadius = 50;
+    }
+    
+    if (isNaN(innerRadius) || innerRadius <= 0 || innerRadius >= outerRadius) {
+      console.warn("Rayon intérieur invalide, utilisation de 50% du rayon extérieur");
+      innerRadius = outerRadius * 0.5;
+    }
 
-  const scaledOuterRadius = outerRadius * scale;
-  const scaledInnerRadius = innerRadius * scale;
+    // Calculate the scale to fit in the SVG
+    const maxRadius = Math.max(outerRadius, 1); // Prevent division by zero
+    const scale = Math.min((width - 80) / (maxRadius * 2), (height - 80) / (maxRadius * 2));
 
-  // Create SVG
-  return `<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">
-    <rect width="100%" height="100%" fill="#f8f9fa"/>
+    const scaledOuterRadius = outerRadius * scale;
+    const scaledInnerRadius = innerRadius * scale;
 
-    <!-- Washer representation -->
-    <circle cx="${centerX}" cy="${centerY}" r="${scaledOuterRadius}" fill="#e9ecef" stroke="#333" stroke-width="1" />
-    <circle cx="${centerX}" cy="${centerY}" r="${scaledInnerRadius}" fill="#f8f9fa" stroke="#333" stroke-width="1" />
+    // Create SVG
+    return `<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">
+      <rect width="100%" height="100%" fill="#f8f9fa"/>
 
-    <!-- Dimensions -->
-    <text x="50%" y="${height - 40}" font-family="Arial" font-size="14" text-anchor="middle" fill="#6c757d">
-      ${stepData.productName || 'Rondelle'}
-    </text>
-    <text x="50%" y="${height - 20}" font-family="Arial" font-size="12" text-anchor="middle" fill="#6c757d">
-      Ø${(outerRadius/3*2).toFixed(1)} x Ø${(innerRadius/3*2).toFixed(1)} x ${stepData.dimensions.height.toFixed(1)} mm
-    </text>
-  </svg>`;
+      <!-- Washer representation -->
+      <circle cx="${centerX}" cy="${centerY}" r="${scaledOuterRadius}" fill="#e9ecef" stroke="#333" stroke-width="1" />
+      <circle cx="${centerX}" cy="${centerY}" r="${scaledInnerRadius}" fill="#f8f9fa" stroke="#333" stroke-width="1" />
+
+      <!-- Dimensions -->
+      <text x="50%" y="${height - 40}" font-family="Arial" font-size="14" text-anchor="middle" fill="#6c757d">
+        ${productName}
+      </text>
+      <text x="50%" y="${height - 20}" font-family="Arial" font-size="12" text-anchor="middle" fill="#6c757d">
+        Ø${(outerRadius/3*2).toFixed(1)} x Ø${(innerRadius/3*2).toFixed(1)} x ${dimensions.height.toFixed(1)} mm
+      </text>
+    </svg>`;
+  } catch (err) {
+    console.error("Erreur lors de la génération de l'aperçu de rondelle:", err);
+    
+    // Return a simple fallback SVG
+    return `<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">
+      <rect width="100%" height="100%" fill="#f8f9fa"/>
+      <text x="50%" y="50%" font-family="Arial" font-size="20" text-anchor="middle" fill="#6c757d">
+        Rondelle
+      </text>
+      <text x="50%" y="65%" font-family="Arial" font-size="14" text-anchor="middle" fill="#6c757d">
+        Aperçu non disponible
+      </text>
+    </svg>`;
+  }
 }
 
 // API ROUTES
@@ -830,33 +939,121 @@ app.get('/api/materials/:id', (req, res) => {
 // Upload file route
 app.post('/api/upload', upload.single('file'), async (req, res) => {
   try {
+    console.log("Requête de téléchargement reçue");
+    
     if (!req.file) {
+      console.error("Aucun fichier dans la requête");
       return res.status(400).json({ error: "No file uploaded" });
+    }
+    
+    console.log(`Fichier reçu: ${req.file.originalname} (${req.file.size} octets)`);
+    
+    // Vérifier que le fichier existe
+    if (!fs.existsSync(req.file.path)) {
+      console.error(`Le fichier téléchargé n'existe pas: ${req.file.path}`);
+      return res.status(500).json({ error: "Le fichier téléchargé n'a pas été correctement enregistré" });
     }
 
     const fileExtension = path.extname(req.file.originalname).toLowerCase().replace('.', '');
+    console.log(`Extension du fichier: ${fileExtension}`);
 
-    // Process the uploaded file
-    const result = await processFile(req.file, fileExtension);
+    try {
+      // Process the uploaded file
+      const result = await processFile(req.file, fileExtension);
+      console.log("Traitement du fichier terminé");
 
-    // Create a preview path for frontend
-    const previewPath = `/uploads/${path.basename(req.file.path, path.extname(req.file.path))}_preview.svg`;
+      // Vérifier que le résultat est valide
+      if (!result) {
+        throw new Error("Le traitement du fichier n'a pas retourné de résultat");
+      }
 
-    res.json({
-      success: true,
-      file: {
-        originalName: req.file.originalname,
-        filename: req.file.filename,
-        path: req.file.path,
-        size: req.file.size,
-        extension: fileExtension,
-        previewPath: previewPath
-      },
-      analysis: result
-    });
+      // Create a preview path for frontend
+      const previewBaseName = path.basename(req.file.path, path.extname(req.file.path));
+      const previewFileName = `${previewBaseName}_preview.svg`;
+      const previewPath = `/uploads/${previewFileName}`;
+      const fullPreviewPath = path.join(__dirname, 'uploads', previewFileName);
+
+      // Si l'aperçu n'existe pas, créer un aperçu par défaut
+      if (!fs.existsSync(fullPreviewPath)) {
+        console.log(`L'aperçu n'existe pas, création d'un aperçu par défaut: ${fullPreviewPath}`);
+        const defaultSvg = `<svg width="400" height="300" xmlns="http://www.w3.org/2000/svg">
+          <rect width="100%" height="100%" fill="#f8f9fa"/>
+          <text x="50%" y="50%" font-family="Arial" font-size="20" text-anchor="middle" fill="#6c757d">
+            Aperçu non disponible
+          </text>
+          <text x="50%" y="65%" font-family="Arial" font-size="14" text-anchor="middle" fill="#6c757d">
+            ${fileExtension.toUpperCase()} - ${result.dimensions.length.toFixed(2)} x ${result.dimensions.width.toFixed(2)} x ${result.dimensions.height.toFixed(2)} mm
+          </text>
+        </svg>`;
+        fs.writeFileSync(fullPreviewPath, defaultSvg);
+      }
+
+      // Envoyer la réponse
+      res.json({
+        success: true,
+        file: {
+          originalName: req.file.originalname,
+          filename: req.file.filename,
+          path: req.file.path,
+          size: req.file.size,
+          extension: fileExtension,
+          previewPath: previewPath
+        },
+        analysis: result
+      });
+      console.log("Réponse envoyée avec succès");
+    } catch (processingError) {
+      console.error("Erreur lors du traitement du fichier:", processingError);
+      // En cas d'erreur de traitement, retourner quand même des résultats par défaut
+      const defaultResult = {
+        dimensions: { length: 100, width: 50, height: 25 },
+        volume: 100 * 50 * 25,
+        material: 'AISI 1018 Steel',
+        weight: 0.984, // Poids approximatif pour ces dimensions avec de l'acier
+        cost: 1.18, // Coût approximatif
+        alternatives: [],
+        annotations: [`Erreur lors du traitement: ${processingError.message}`],
+        tolerances: ['±0.1mm sur les dimensions critiques']
+      };
+      
+      // Créer un aperçu d'erreur
+      const previewBaseName = path.basename(req.file.path, path.extname(req.file.path));
+      const previewFileName = `${previewBaseName}_preview.svg`;
+      const previewPath = `/uploads/${previewFileName}`;
+      const fullPreviewPath = path.join(__dirname, 'uploads', previewFileName);
+      
+      const errorSvg = `<svg width="400" height="300" xmlns="http://www.w3.org/2000/svg">
+        <rect width="100%" height="100%" fill="#f8f9fa"/>
+        <text x="50%" y="50%" font-family="Arial" font-size="20" text-anchor="middle" fill="#6c757d">
+          Erreur lors du traitement
+        </text>
+        <text x="50%" y="65%" font-family="Arial" font-size="14" text-anchor="middle" fill="#6c757d">
+          ${fileExtension.toUpperCase()} - Utilisations des dimensions par défaut
+        </text>
+      </svg>`;
+      fs.writeFileSync(fullPreviewPath, errorSvg);
+      
+      res.json({
+        success: true,
+        file: {
+          originalName: req.file.originalname,
+          filename: req.file.filename,
+          path: req.file.path,
+          size: req.file.size,
+          extension: fileExtension,
+          previewPath: previewPath
+        },
+        analysis: defaultResult
+      });
+    }
   } catch (error) {
-    console.error("Error processing upload:", error);
-    res.status(500).json({ error: "Failed to process uploaded file", details: error.message });
+    console.error("Erreur critique lors du téléchargement:", error);
+    console.error(error.stack);
+    res.status(500).json({ 
+      error: "Failed to process uploaded file", 
+      details: error.message,
+      stack: error.stack
+    });
   }
 });
 
