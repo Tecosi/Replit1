@@ -527,25 +527,143 @@ async function processFile(file, fileExtension) {
 
 // Parse STEP file to extract dimensions and other metadata
 async function parseStepFile(filePath) {
-  return new Promise((resolve, reject) => {
+  return new Promise(async (resolve, reject) => {
     try {
-      console.log(`Traitement du fichier STEP: ${filePath}`);
+      console.log(`Traitement du fichier STEP avec OCCUtils: ${filePath}`);
 
       // Check if file exists
       if (!fs.existsSync(filePath)) {
         console.error(`Le fichier STEP n'existe pas: ${filePath}`);
-        resolve({
-          productName: "Pièce inconnue",
-          dimensions: { length: 30, width: 30, height: 5 },
-          material: 'AISI 1018 Steel',
-          annotations: ["Fichier introuvable"],
-          boundingBox: { min: [0, 0, 0], max: [30, 30, 5] },
-          cartesianPoints: [],
-          circles: []
-        });
+        resolve(createDefaultStepData(path.basename(filePath, path.extname(filePath)), "Fichier introuvable"));
         return;
       }
 
+      try {
+        // Tenter d'utiliser la bibliothèque OCCUtils pour l'analyse STEP
+        const { StepReader } = require('step-reader');
+        const stepReader = new StepReader();
+        
+        // Tentative de lecture du fichier STEP
+        const fileBuffer = fs.readFileSync(filePath);
+        const stepData = await stepReader.read(fileBuffer);
+        
+        if (!stepData) {
+          throw new Error("Impossible d'analyser le fichier STEP avec OCCUtils");
+        }
+        
+        console.log("Analyse OCCUtils réussie, extraction des données");
+        
+        const fileName = path.basename(filePath, path.extname(filePath));
+        let productName = stepData.name || fileName || "Pièce mécanique";
+        
+        // Extraire les entités
+        const entities = stepData.entities || {};
+        const shapes = entities.shapes || [];
+        
+        // Initialiser les données
+        let boundingBox = { min: [Infinity, Infinity, Infinity], max: [-Infinity, -Infinity, -Infinity] };
+        let cartesianPoints = [];
+        let circles = [];
+        let annotations = [];
+        let materialInfo = '';
+        
+        // Analyser les entités pour extraire les informations
+        for (const shape of shapes) {
+          // Extraire les points et mettre à jour la boîte englobante
+          if (shape.type === 'point' && shape.coordinates) {
+            const point = shape.coordinates;
+            cartesianPoints.push(point);
+            
+            // Mettre à jour bounding box
+            boundingBox.min[0] = Math.min(boundingBox.min[0], point[0]);
+            boundingBox.min[1] = Math.min(boundingBox.min[1], point[1]);
+            boundingBox.min[2] = Math.min(boundingBox.min[2], point[2]);
+            
+            boundingBox.max[0] = Math.max(boundingBox.max[0], point[0]);
+            boundingBox.max[1] = Math.max(boundingBox.max[1], point[1]);
+            boundingBox.max[2] = Math.max(boundingBox.max[2], point[2]);
+          }
+          
+          // Extraire les cercles
+          if (shape.type === 'circle' && shape.radius) {
+            circles.push(shape.radius);
+            console.log(`Cercle trouvé: rayon = ${shape.radius}mm`);
+          }
+          
+          // Extraire les annotations si disponibles
+          if (shape.properties) {
+            for (const [key, value] of Object.entries(shape.properties)) {
+              if (value && typeof value === 'string') {
+                annotations.push(`${key}: ${value}`);
+              }
+              
+              // Rechercher des informations sur le matériau
+              if (key.toLowerCase().includes('material') || key.toLowerCase().includes('matériau')) {
+                materialInfo = value;
+              }
+            }
+          }
+        }
+        
+        // Si nous n'avons pas de points après l'analyse OCCUtils, utiliser la méthode de secours
+        if (cartesianPoints.length === 0) {
+          console.log("Aucun point trouvé avec OCCUtils, utilisation de la méthode de secours");
+          return await parseStepFileBackup(filePath);
+        }
+        
+        // Calculer les dimensions à partir de la boîte englobante
+        const dimensions = calculateDimensions(boundingBox, circles, fileName, productName);
+        
+        // Déterminer le matériau
+        const material = determineMaterial(materialInfo, stepData.description || "");
+        
+        // Créer l'objet de données validées
+        const validatedData = {
+          productName,
+          dimensions,
+          material,
+          annotations: annotations.length > 0 ? annotations : ["Aucune annotation trouvée"],
+          boundingBox,
+          cartesianPoints,
+          circles,
+          source: "OCCUtils"
+        };
+        
+        // Valider les données extraites
+        const validationResults = validateStepData(validatedData);
+        if (!validationResults.isValid) {
+          console.warn("Données extraites invalides:", validationResults.errors);
+          console.log("Utilisation de la méthode de secours");
+          return await parseStepFileBackup(filePath);
+        }
+        
+        console.log(`Données extraites validées: ${validatedData.dimensions.length.toFixed(2)} x ${validatedData.dimensions.width.toFixed(2)} x ${validatedData.dimensions.height.toFixed(2)} mm`);
+        
+        resolve(validatedData);
+      } catch (libraryError) {
+        console.error("Erreur avec la bibliothèque OCCUtils:", libraryError);
+        console.log("Utilisation de la méthode de secours");
+        
+        // Utiliser la méthode de secours en cas d'échec
+        const backupData = await parseStepFileBackup(filePath);
+        resolve(backupData);
+      }
+    } catch (err) {
+      console.error("Exception critique lors du traitement du fichier STEP:", err);
+      console.error(err.stack);
+      
+      // Créer des données par défaut
+      resolve(createDefaultStepData(path.basename(filePath, path.extname(filePath)), "Exception critique"));
+    }
+  });
+}
+
+// Méthode de secours pour l'analyse des fichiers STEP
+async function parseStepFileBackup(filePath) {
+  return new Promise((resolve, reject) => {
+    try {
+      console.log(`Utilisation de la méthode de secours pour analyser ${filePath}`);
+      
       // Read the file content
       const fileStream = fs.createReadStream(filePath);
       const rl = readline.createInterface({
@@ -581,7 +699,7 @@ async function parseStepFile(filePath) {
               console.log(`Diamètre extrait du nom: ${diameter}mm`);
 
               // Default height for washers if not specified
-              const height = 5; 
+              const height = 5;
 
               boundingBox = {
                 min: [-diameter/2, -diameter/2, -height/2],
@@ -697,161 +815,237 @@ async function parseStepFile(filePath) {
       rl.on('close', () => {
         console.log(`Analyse du fichier STEP terminée. Points: ${cartesianPoints.length}, Cercles: ${circles.length}`);
 
-        // Calculate dimensions from bounding box
-        let dimensions = {
-          length: 0,
-          width: 0,
-          height: 0
-        };
-
-        // Check if we found valid points for bounding box
-        if (boundingBox.min[0] !== Infinity && boundingBox.max[0] !== -Infinity) {
-          console.log(`Boîte englobante trouvée: Min(${boundingBox.min.join(', ')}), Max(${boundingBox.max.join(', ')})`);
-
-          // Calculate dimensions in mm
-          dimensions.length = Math.abs(boundingBox.max[0] - boundingBox.min[0]);
-          dimensions.width = Math.abs(boundingBox.max[1] - boundingBox.min[1]);
-          dimensions.height = Math.abs(boundingBox.max[2] - boundingBox.min[2]);
-
-          console.log(`Dimensions calculées: ${dimensions.length.toFixed(2)} x ${dimensions.width.toFixed(2)} x ${dimensions.height.toFixed(2)} mm`);
-
-          // Sort dimensions to ensure length is the largest
-          const dims = [dimensions.length, dimensions.width, dimensions.height].sort((a, b) => b - a);
-          dimensions.length = dims[0];
-          dimensions.width = dims[1];
-          dimensions.height = dims[2];
-
-          console.log(`Dimensions triées: ${dimensions.length.toFixed(2)} x ${dimensions.width.toFixed(2)} x ${dimensions.height.toFixed(2)} mm`);
-
-          // Special case for circular parts like washers
-          if (circles.length > 0 && 
-              (productName.toLowerCase().includes('rondelle') || 
-               productName.toLowerCase().includes('washer') ||
-               fileName.toLowerCase().includes('rondelle') ||
-               fileName.toLowerCase().includes('washer'))) {
-
-            const largestRadius = Math.max(...circles);
-            console.log(`Rayon de la rondelle détecté: ${largestRadius}mm`);
-
-            dimensions.length = largestRadius * 2;
-            dimensions.width = largestRadius * 2;
-
-            // For specific rondelleintercloche files or if height is very small
-            if (productName.includes('Rondelleintercloche') || dimensions.height < 0.5) {
-              dimensions.height = 5; // Standard washer thickness
-            }
-
-            console.log(`Dimensions de rondelle: ${dimensions.length.toFixed(2)} x ${dimensions.width.toFixed(2)} x ${dimensions.height.toFixed(2)} mm`);
-          }
-
-          // Apply minimum dimensions to avoid zero or very small values
-          dimensions.length = Math.max(dimensions.length, 5);
-          dimensions.width = Math.max(dimensions.width, 5);
-          dimensions.height = Math.max(dimensions.height, 2);
-        } else {
-          console.log("Aucun point valide trouvé pour calculer les dimensions. Utilisation des valeurs par défaut.");
-
-          // If no points found, use default dimensions based on file name or generic values
-          if (fileName.toLowerCase().includes('rondelle') || fileName.toLowerCase().includes('washer')) {
-            dimensions = { length: 30, width: 30, height: 5 };
-          } else if (fileName.toLowerCase().includes('vis') || fileName.toLowerCase().includes('screw')) {
-            dimensions = { length: 50, width: 10, height: 10};
-          } else if (fileName.toLowerCase().includes('bracket') || fileName.toLowerCase().includes('support')) {
-            dimensions = { length: 80, width: 40, height: 10 };
-          } else {
-            dimensions = { length: 50, width: 30, height: 10 };
-          }
-
-          console.log(`Dimensions par défaut: ${dimensions.length} x ${dimensions.width} x ${dimensions.height} mm`);
-        }
-
-        // Determine material from file content or product name
-        let material = 'AISI 1018 Steel'; // Default material
-
-        if (materialInfo) {
-          material = materialInfo;
-          console.log(`Matériau extrait: ${material}`);
-        } else {
-          // Try to determine material from file content
-          const lowerContent = fileContent.toLowerCase();
-
-          if (materialLines.length > 0) {
-            console.log("Lignes avec information sur le matériau:", materialLines);
-          }
-
-          if (lowerContent.includes('acier') || lowerContent.includes('steel')) {
-            if (lowerContent.includes('inox') || lowerContent.includes('stainless')) {
-              material = 'AISI 304 Stainless Steel';
-            } else {
-              material = 'AISI 1018 Steel';
-            }
-          } else if (lowerContent.includes('aluminium') || lowerContent.includes('aluminum')) {
-            if (lowerContent.includes('6061')) {
-              material = 'Aluminum 6061-T6';
-            } else if (lowerContent.includes('7075')) {
-              material = 'Aluminum 7075-T6';
-            } else {
-              material = 'Aluminum 6061-T6';
-            }
-          } else if (lowerContent.includes('titanium') || lowerContent.includes('titane')) {
-            material = 'Ti-6Al-4V';
-          } else if (lowerContent.includes('brass') || lowerContent.includes('laiton')) {
-            material = 'Brass C360';
-          } else if (lowerContent.includes('bronze')) {
-            material = 'Bronze C932';
-          } else if (lowerContent.includes('copper') || lowerContent.includes('cuivre')) {
-            material = 'Copper C11000';
-          }
-
-          console.log(`Matériau déterminé: ${material}`);
-        }
+        // Calculer les dimensions à partir de la boîte englobante
+        const dimensions = calculateDimensions(boundingBox, circles, fileName, productName);
+        
+        // Déterminer le matériau
+        const material = determineMaterial(materialInfo, fileContent);
 
         // If product name is still empty, try to extract from file name
         if (!productName) {
-          productName = path.basename(filePath, path.extname(filePath));
+          productName = fileName;
           console.log(`Nom du produit extrait du nom de fichier: ${productName}`);
         }
 
-        // Return the extracted data
-        resolve({
+        // Créer l'objet de données validées
+        const stepData = {
           productName,
           dimensions,
           material,
-          annotations,
+          annotations: annotations.length > 0 ? annotations : ["Aucune annotation trouvée"],
           boundingBox,
           cartesianPoints,
-          circles
-        });
+          circles,
+          source: "Backup parser"
+        };
+        
+        // Valider les données
+        const validationResults = validateStepData(stepData);
+        if (!validationResults.isValid) {
+          console.warn("Données de secours invalides:", validationResults.errors);
+          
+          // Appliquer des corrections aux données invalides
+          if (validationResults.errors.includes("dimensions_invalid")) {
+            console.log("Correction des dimensions invalides");
+            stepData.dimensions = getDefaultDimensions(fileName);
+          }
+        }
+
+        resolve(stepData);
       });
 
       rl.on('error', (err) => {
         console.error("Erreur lors de la lecture du fichier STEP:", err);
         // Resolve with default data instead of rejecting
-        resolve({
-          productName: path.basename(filePath, path.extname(filePath)) || "Pièce inconnue",
-          dimensions: { length: 30, width: 30, height: 5 },
-          material: 'AISI 1018 Steel',
-          annotations: ["Erreur lors de la lecture du fichier"],
-          boundingBox: { min: [0, 0, 0], max: [30, 30, 5] },
-          cartesianPoints: [],
-          circles: []
-        });
+        resolve(createDefaultStepData(fileName, "Erreur de lecture"));
       });
     } catch (err) {
-      console.error("Exception lors du traitement du fichier STEP:", err);
+      console.error("Exception lors du traitement de secours du fichier STEP:", err);
       console.error(err.stack);
       // Resolve with default data instead of rejecting
-      resolve({
-        productName: path.basename(filePath, path.extname(filePath)) || "Pièce inconnue",
-        dimensions: { length: 30, width: 30, height: 5 },
-        material: 'AISI 1018 Steel',
-        annotations: ["Exception lors du traitement du fichier"],
-        boundingBox: { min: [0, 0, 0], max: [30, 30, 5] },
-        cartesianPoints: [],
-        circles: []
-      });
+      resolve(createDefaultStepData(path.basename(filePath, path.extname(filePath)), "Exception dans l'analyse de secours"));
     }
   });
+}
+
+// Calculer les dimensions à partir de la boîte englobante
+function calculateDimensions(boundingBox, circles, fileName, productName) {
+  let dimensions = {
+    length: 0,
+    width: 0,
+    height: 0
+  };
+
+  // Check if we found valid points for bounding box
+  if (boundingBox.min[0] !== Infinity && boundingBox.max[0] !== -Infinity) {
+    console.log(`Boîte englobante trouvée: Min(${boundingBox.min.join(', ')}), Max(${boundingBox.max.join(', ')})`);
+
+    // Calculate dimensions in mm
+    dimensions.length = Math.abs(boundingBox.max[0] - boundingBox.min[0]);
+    dimensions.width = Math.abs(boundingBox.max[1] - boundingBox.min[1]);
+    dimensions.height = Math.abs(boundingBox.max[2] - boundingBox.min[2]);
+
+    console.log(`Dimensions calculées: ${dimensions.length.toFixed(2)} x ${dimensions.width.toFixed(2)} x ${dimensions.height.toFixed(2)} mm`);
+
+    // Sort dimensions to ensure length is the largest
+    const dims = [dimensions.length, dimensions.width, dimensions.height].sort((a, b) => b - a);
+    dimensions.length = dims[0];
+    dimensions.width = dims[1];
+    dimensions.height = dims[2];
+
+    console.log(`Dimensions triées: ${dimensions.length.toFixed(2)} x ${dimensions.width.toFixed(2)} x ${dimensions.height.toFixed(2)} mm`);
+
+    // Special case for circular parts like washers
+    if (circles.length > 0 && 
+        (productName.toLowerCase().includes('rondelle') || 
+         productName.toLowerCase().includes('washer') ||
+         fileName.toLowerCase().includes('rondelle') ||
+         fileName.toLowerCase().includes('washer'))) {
+
+      const largestRadius = Math.max(...circles);
+      console.log(`Rayon de la rondelle détecté: ${largestRadius}mm`);
+
+      dimensions.length = largestRadius * 2;
+      dimensions.width = largestRadius * 2;
+
+      // For specific rondelleintercloche files or if height is very small
+      if (productName.includes('Rondelleintercloche') || dimensions.height < 0.5) {
+        dimensions.height = 5; // Standard washer thickness
+      }
+
+      console.log(`Dimensions de rondelle: ${dimensions.length.toFixed(2)} x ${dimensions.width.toFixed(2)} x ${dimensions.height.toFixed(2)} mm`);
+    }
+
+    // Apply minimum dimensions to avoid zero or very small values
+    dimensions.length = Math.max(dimensions.length, 5);
+    dimensions.width = Math.max(dimensions.width, 5);
+    dimensions.height = Math.max(dimensions.height, 2);
+  } else {
+    console.log("Aucun point valide trouvé pour calculer les dimensions. Utilisation des valeurs par défaut.");
+    dimensions = getDefaultDimensions(fileName);
+  }
+  
+  return dimensions;
+}
+
+// Fonction pour obtenir les dimensions par défaut en fonction du nom de fichier
+function getDefaultDimensions(fileName) {
+  let dimensions;
+  
+  if (!fileName) {
+    dimensions = { length: 50, width: 30, height: 10 };
+  } else if (fileName.toLowerCase().includes('rondelle') || fileName.toLowerCase().includes('washer')) {
+    dimensions = { length: 30, width: 30, height: 5 };
+  } else if (fileName.toLowerCase().includes('vis') || fileName.toLowerCase().includes('screw')) {
+    dimensions = { length: 50, width: 10, height: 10};
+  } else if (fileName.toLowerCase().includes('bracket') || fileName.toLowerCase().includes('support')) {
+    dimensions = { length: 80, width: 40, height: 10 };
+  } else {
+    dimensions = { length: 50, width: 30, height: 10 };
+  }
+  
+  console.log(`Dimensions par défaut: ${dimensions.length} x ${dimensions.width} x ${dimensions.height} mm`);
+  return dimensions;
+}
+
+// Déterminer le matériau à partir des informations disponibles
+function determineMaterial(materialInfo, content) {
+  let material = 'AISI 1018 Steel'; // Default material
+
+  if (materialInfo) {
+    material = materialInfo;
+    console.log(`Matériau extrait: ${material}`);
+  } else {
+    // Try to determine material from file content
+    const lowerContent = typeof content === 'string' ? content.toLowerCase() : '';
+
+    if (lowerContent.includes('acier') || lowerContent.includes('steel')) {
+      if (lowerContent.includes('inox') || lowerContent.includes('stainless')) {
+        material = 'AISI 304 Stainless Steel';
+      } else {
+        material = 'AISI 1018 Steel';
+      }
+    } else if (lowerContent.includes('aluminium') || lowerContent.includes('aluminum')) {
+      if (lowerContent.includes('6061')) {
+        material = 'Aluminum 6061-T6';
+      } else if (lowerContent.includes('7075')) {
+        material = 'Aluminum 7075-T6';
+      } else {
+        material = 'Aluminum 6061-T6';
+      }
+    } else if (lowerContent.includes('titanium') || lowerContent.includes('titane')) {
+      material = 'Ti-6Al-4V';
+    } else if (lowerContent.includes('brass') || lowerContent.includes('laiton')) {
+      material = 'Brass C360';
+    } else if (lowerContent.includes('bronze')) {
+      material = 'Bronze C932';
+    } else if (lowerContent.includes('copper') || lowerContent.includes('cuivre')) {
+      material = 'Copper C11000';
+    }
+
+    console.log(`Matériau déterminé: ${material}`);
+  }
+  
+  return material;
+}
+
+// Créer des données STEP par défaut
+function createDefaultStepData(fileName, reason) {
+  return {
+    productName: fileName || "Pièce inconnue",
+    dimensions: getDefaultDimensions(fileName),
+    material: 'AISI 1018 Steel',
+    annotations: [reason || "Analyse impossible"],
+    boundingBox: { min: [0, 0, 0], max: [30, 30, 5] },
+    cartesianPoints: [],
+    circles: [],
+    source: "Default data"
+  };
+}
+
+// Valider les données STEP
+function validateStepData(data) {
+  const errors = [];
+  
+  // Vérifier que les dimensions sont valides
+  if (!data.dimensions || 
+      !data.dimensions.length || 
+      !data.dimensions.width || 
+      !data.dimensions.height ||
+      isNaN(data.dimensions.length) ||
+      isNaN(data.dimensions.width) ||
+      isNaN(data.dimensions.height) ||
+      data.dimensions.length <= 0 ||
+      data.dimensions.width <= 0 ||
+      data.dimensions.height <= 0) {
+    errors.push("dimensions_invalid");
+  }
+  
+  // Vérifier que le nom du produit est présent
+  if (!data.productName) {
+    errors.push("productName_missing");
+  }
+  
+  // Vérifier que le matériau est présent
+  if (!data.material) {
+    errors.push("material_missing");
+  }
+  
+  // Vérifier que la boîte englobante est valide si des points ont été trouvés
+  if (data.cartesianPoints && data.cartesianPoints.length > 0) {
+    if (!data.boundingBox || 
+        !data.boundingBox.min || 
+        !data.boundingBox.max ||
+        data.boundingBox.min[0] === Infinity ||
+        data.boundingBox.max[0] === -Infinity) {
+      errors.push("boundingBox_invalid");
+    }
+  }
+  
+  return {
+    isValid: errors.length === 0,
+    errors: errors
+  };
 }
 
 // Generate a preview SVG for STEP files
@@ -1239,6 +1433,17 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
       console.log(`Début du traitement du fichier ${req.file.path}`);
       result = await processFile(req.file, fileExtension);
       console.log("Traitement du fichier terminé avec succès");
+      
+      // Valider les données après le traitement
+      const validationResult = validateProcessedData(result);
+      if (!validationResult.isValid) {
+        console.warn("Données traitées invalides:", validationResult.errors);
+        
+        // Corriger les données invalides
+        result = correctInvalidData(result, fileExtension, req.file.originalname);
+        console.log("Données corrigées après validation");
+      }
+      
     } catch (processingError) {
       console.error("Erreur lors du traitement du fichier:", processingError);
       console.error(processingError.stack);
@@ -1520,3 +1725,165 @@ app.post('/api/compare-materials', async (req, res) => {
 app.listen(port, '0.0.0.0', () => {
   console.log(`Server running on http://0.0.0.0:${port}`);
 });
+
+// Valider les données traitées
+function validateProcessedData(data) {
+  const errors = [];
+  
+  // Vérifier que les données existent
+  if (!data) {
+    return {
+      isValid: false,
+      errors: ["data_missing"]
+    };
+  }
+  
+  // Vérifier les dimensions
+  if (!data.dimensions || 
+      !data.dimensions.length || 
+      !data.dimensions.width || 
+      !data.dimensions.height ||
+      isNaN(data.dimensions.length) ||
+      isNaN(data.dimensions.width) ||
+      isNaN(data.dimensions.height) ||
+      data.dimensions.length <= 0 ||
+      data.dimensions.width <= 0 ||
+      data.dimensions.height <= 0) {
+    errors.push("dimensions_invalid");
+  }
+  
+  // Vérifier le volume
+  if (!data.volume || isNaN(data.volume) || data.volume <= 0) {
+    errors.push("volume_invalid");
+  }
+  
+  // Vérifier le matériau
+  if (!data.material) {
+    errors.push("material_missing");
+  }
+  
+  // Vérifier le poids
+  if (!data.weight || isNaN(data.weight) || data.weight <= 0) {
+    errors.push("weight_invalid");
+  }
+  
+  // Vérifier le coût
+  if (!data.cost || isNaN(data.cost) || data.cost < 0) {
+    errors.push("cost_invalid");
+  }
+  
+  // Vérifier que les alternatives sont un tableau
+  if (!Array.isArray(data.alternatives)) {
+    errors.push("alternatives_invalid");
+  }
+  
+  // Vérifier que les annotations sont un tableau
+  if (!Array.isArray(data.annotations)) {
+    errors.push("annotations_invalid");
+  }
+  
+  // Vérifier que les tolérances sont un tableau
+  if (!Array.isArray(data.tolerances)) {
+    errors.push("tolerances_invalid");
+  }
+  
+  return {
+    isValid: errors.length === 0,
+    errors: errors
+  };
+}
+
+// Corriger les données invalides
+function correctInvalidData(data, fileExtension, originalFilename) {
+  // Créer une copie des données pour ne pas modifier l'original
+  const correctedData = { ...data };
+  
+  // Extraire un nom de fichier potentiellement utile
+  const fileName = path.basename(originalFilename, path.extname(originalFilename));
+  
+  // Corriger les dimensions invalides
+  if (!correctedData.dimensions ||
+      !correctedData.dimensions.length || 
+      !correctedData.dimensions.width || 
+      !correctedData.dimensions.height ||
+      isNaN(correctedData.dimensions.length) ||
+      isNaN(correctedData.dimensions.width) ||
+      isNaN(correctedData.dimensions.height) ||
+      correctedData.dimensions.length <= 0 ||
+      correctedData.dimensions.width <= 0 ||
+      correctedData.dimensions.height <= 0) {
+    
+    // Définir des dimensions par défaut basées sur le type de fichier
+    if (fileExtension === 'step' || fileExtension === 'stp') {
+      correctedData.dimensions = { length: 30, width: 30, height: 5 };
+    } else if (fileExtension === 'stl') {
+      correctedData.dimensions = { length: 120, width: 80, height: 40 };
+    } else if (fileExtension === 'dxf') {
+      correctedData.dimensions = { length: 200, width: 100, height: 10 };
+    } else if (fileExtension === 'dwg') {
+      correctedData.dimensions = { length: 180, width: 90, height: 15 };
+    } else if (fileExtension === 'pdf') {
+      correctedData.dimensions = { length: 210, width: 297, height: 5 };
+    } else {
+      correctedData.dimensions = { length: 100, width: 50, height: 25 };
+    }
+    
+    // Ajouter une annotation pour indiquer la correction
+    if (!Array.isArray(correctedData.annotations)) {
+      correctedData.annotations = [];
+    }
+    correctedData.annotations.push("Dimensions invalides corrigées avec des valeurs par défaut");
+  }
+  
+  // Corriger le volume
+  if (!correctedData.volume || isNaN(correctedData.volume) || correctedData.volume <= 0) {
+    correctedData.volume = correctedData.dimensions.length * correctedData.dimensions.width * correctedData.dimensions.height;
+  }
+  
+  // Corriger le matériau manquant
+  if (!correctedData.material) {
+    correctedData.material = 'AISI 1018 Steel';
+    
+    // Ajouter une annotation pour indiquer la correction
+    if (!Array.isArray(correctedData.annotations)) {
+      correctedData.annotations = [];
+    }
+    correctedData.annotations.push("Matériau non détecté, utilisation de l'acier par défaut");
+  }
+  
+  // Corriger le poids
+  if (!correctedData.weight || isNaN(correctedData.weight) || correctedData.weight <= 0) {
+    // Calculer un poids approximatif basé sur le volume et le matériau (acier par défaut)
+    const density = 7.85; // Densité de l'acier en g/cm³
+    correctedData.weight = (density * correctedData.volume) / 1000000; // Convertir mm³ en cm³ et calculer le poids en kg
+  }
+  
+  // Corriger le coût
+  if (!correctedData.cost || isNaN(correctedData.cost) || correctedData.cost < 0) {
+    // Calculer un coût approximatif basé sur le poids et un coût moyen par kg
+    const costPerKg = 2.0; // Coût moyen par kg pour l'acier
+    correctedData.cost = correctedData.weight * costPerKg;
+  }
+  
+  // S'assurer que alternatives est un tableau
+  if (!Array.isArray(correctedData.alternatives)) {
+    correctedData.alternatives = [];
+  }
+  
+  // S'assurer que annotations est un tableau
+  if (!Array.isArray(correctedData.annotations)) {
+    correctedData.annotations = ["Données extraites automatiquement"];
+  }
+  
+  // S'assurer que tolerances est un tableau
+  if (!Array.isArray(correctedData.tolerances)) {
+    correctedData.tolerances = ['±0.1mm sur les dimensions critiques'];
+  }
+  
+  // Ajouter le nom du produit s'il est manquant
+  if (!correctedData.productName) {
+    correctedData.productName = fileName || 'Pièce mécanique';
+  }
+  
+  return correctedData;
+}
