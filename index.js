@@ -537,18 +537,63 @@ async function parseStepFile(filePath) {
         resolve(createDefaultStepData(path.basename(filePath, path.extname(filePath)), "Fichier introuvable"));
         return;
       }
+      
+      console.log("Vérification de l'installation des bibliothèques STEP");
+      // Vérifier si les bibliothèques STEP sont installées
+      let stepReaderInstalled = false;
+      let stepParserInstalled = false;
+      
+      try {
+        require.resolve('step-reader');
+        stepReaderInstalled = true;
+        console.log("step-reader est installé");
+      } catch (e) {
+        console.log("step-reader n'est pas installé");
+      }
+      
+      try {
+        require.resolve('step-parser');
+        stepParserInstalled = true;
+        console.log("step-parser est installé");
+      } catch (e) {
+        console.log("step-parser n'est pas installé");
+      }
+      
+      if (!stepReaderInstalled && !stepParserInstalled) {
+        console.log("Aucune bibliothèque STEP n'est installée, utilisation uniquement de la méthode de secours");
+        return await parseStepFileBackup(filePath);
+      }
 
       try {
-        // Tenter d'utiliser la bibliothèque OCCUtils pour l'analyse STEP
-        const { StepReader } = require('step-reader');
-        const stepReader = new StepReader();
+        console.log("Tentative d'utilisation de step-reader pour l'analyse STEP");
         
-        // Tentative de lecture du fichier STEP
-        const fileBuffer = fs.readFileSync(filePath);
-        const stepData = await stepReader.read(fileBuffer);
+        let stepData;
+        try {
+          // Tenter d'utiliser la bibliothèque step-reader
+          const StepReader = require('step-reader');
+          const stepReader = new StepReader();
+          
+          // Tentative de lecture du fichier STEP
+          const fileBuffer = fs.readFileSync(filePath);
+          stepData = await stepReader.read(fileBuffer);
+        } catch (libError) {
+          console.log("step-reader a échoué, essai de step-parser");
+          
+          try {
+            // Tentative avec step-parser en cas d'échec
+            const StepParser = require('step-parser');
+            const parser = new StepParser();
+            
+            const fileContent = fs.readFileSync(filePath, 'utf8');
+            stepData = parser.parse(fileContent);
+          } catch (parserError) {
+            console.log("Toutes les bibliothèques STEP ont échoué, utilisation de l'analyse par secours");
+            throw new Error("Impossible d'analyser le fichier STEP avec les bibliothèques disponibles");
+          }
+        }
         
         if (!stepData) {
-          throw new Error("Impossible d'analyser le fichier STEP avec OCCUtils");
+          throw new Error("Impossible d'analyser le fichier STEP");
         }
         
         console.log("Analyse OCCUtils réussie, extraction des données");
